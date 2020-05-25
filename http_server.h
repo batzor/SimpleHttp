@@ -40,15 +40,27 @@ namespace SimpleHttp {
                 switch(status) {
                     case STATUS_OK:
                         reason = "OK";
+                        break;
                     case STATUS_BAD_REQUEST:
                         reason = "Bad Request";
+                        break;
                     case STATUS_NOT_IMPLEMENTED:
                         reason = "Not Implemented";
+                        break;
                     case STATUS_NOT_FOUND:
                         reason = "Not Found";
+                        break;
                     case STATUS_HTTP_VERSION_NOT_SUPPORTED:
                         reason = "HTTP version not supported";
+                        break;
+                    default:
+                        reason = std::to_string(status);
+                        break;
                 }
+
+#ifdef DEBUG
+                std::cout << "Response: " << reason << std::endl;
+#endif
 
                 std::string header = HTTP_VERSION + " " + std::to_string(status) + " " + reason + CRLF;
                 for (auto const& h: headers) {
