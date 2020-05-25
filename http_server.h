@@ -89,12 +89,12 @@ namespace SimpleHttp {
             int sockfd;
             int port;
 
-            SimpleServer(int port, bool reuse_address = true);
+            SimpleServer(int port, int reuse_address = 1);
             int initSocket(void);
             int startServer(void);
 
         private:
-            bool reuse_address = true;
+            int reuse_address = 1;
             size_t thread_pool_size = 1;
             struct sockaddr_in serv_addr;
     };

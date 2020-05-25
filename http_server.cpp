@@ -107,7 +107,7 @@ namespace SimpleHttp {
         }
     }
 
-    SimpleServer::SimpleServer(int port, bool reuse_address) {
+    SimpleServer::SimpleServer(int port, int reuse_address) {
         this->port = port;
         this->reuse_address = reuse_address;
     }
@@ -117,7 +117,7 @@ namespace SimpleHttp {
         if (sockfd < 0)
             DEBUG_ERR("failed to init socket");
 
-        if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &this->reuse_address, sizeof(bool)) < 0)
+        if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &this->reuse_address, sizeof(int)) < 0)
             DEBUG_ERR("setsockopt(SO_REUSEADDR) failed");
         
         struct sockaddr_in serv_addr;
@@ -151,6 +151,7 @@ namespace SimpleHttp {
                  DEBUG_ERR("failed to accept connection");
 
 
+             DEBUG_ERR("accepted connection");
              Request *tmp = new Request(newsockfd);
              std::thread t(&Request::handleRequest, tmp);
              t.detach();
