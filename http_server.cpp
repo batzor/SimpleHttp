@@ -7,54 +7,47 @@
 
 namespace SimpleHttp {
     Request::Request(int connfd) {
-        std::cout << "initializing request" << std::endl;
         this->connfd = connfd;
-        this->parseHeader();
     }
     int Request::parseHeader() {
-        std::cout << "parsing request" << std::endl;
         std::stringstream header;
 
         int nbytes;
         char c;
-        int crlf_count = 0;
-        bool was_cr;
-        bool not_done = true;
-        while ((nbytes = read(connfd, &c, 1)) > 0 && not_done) {
+        const std::string double_crlf = "\r\n\r\n";
+        int idx = 0;
+        while ((nbytes = read(connfd, &c, 1)) > 0) {
             header << c;
 
-            // read until double CLRF
-            switch (c) {  
-                case CR:
-                    was_cr = true;
+            // read until double CRLF
+            if(c == double_crlf[idx]) {
+                idx++;
+                if(idx == 4)
                     break;
-                case LF:
-                    if(was_cr)
-                        crlf_count++;
-                    else if(crlf_count == 2)
-                       not_done = true;
-                    else
-                        crlf_count = 0;
-                default:
-                    crlf_count = 0;
+            }else if(c == CR){
+                idx = 1;
+            }else{
+                idx = 0;
             }
         }
-
+        
+        std::string s;
+#ifdef DEBUG
+        getline(header, s, '\n');
+        std::cout << "STATUS_LINE:" << s << std::endl;
+        header.seekg(0, std::ios::beg);
+#endif
         header >> this->method;
         header >> this->uri;
         header >> this->version;
-        std::string s;
         getline(header, s, '\n');
-        if(s != ""){
-            return STATUS_BAD_REQUEST;
-        }
 
         // load additional header fields
         while(getline(header, s, '\n')) {
             if(s != "") {
                 size_t pos = s.find(':');
                 if(pos == std::string::npos) {
-                    return STATUS_BAD_REQUEST;
+                    break;
                 }
 
                 std::string name = s.substr(0, pos);
@@ -66,14 +59,19 @@ namespace SimpleHttp {
     }
 
     void Request::handleRequest() {
-        std::cout << "handling request" << std::endl;
         int status;
-        if(!(status = parseHeader())) {
-            Response::sendErrorResponse(connfd, status);
+        if((status = parseHeader()) < 0) {
+#ifdef DEBUG
+            std::cout << status << std::endl;
+#endif
+            Response::sendErrorResponse(connfd, STATUS_BAD_REQUEST);
             return;
         }
 
         if(this->version != HTTP_VERSION) {
+#ifdef DEBUG
+            std::cout << this->version << std::endl;
+#endif
             Response::sendErrorResponse(connfd, STATUS_HTTP_VERSION_NOT_SUPPORTED);
             return;
         }
@@ -154,13 +152,14 @@ namespace SimpleHttp {
          socklen_t addr_size = sizeof(cli_addr);
 
          // Accept incoming connections
-         while(newsockfd = accept(sockfd, (struct sockaddr*) &cli_addr, &addr_size)) {
+         while(true) {
+             newsockfd = accept(sockfd, (struct sockaddr*) &cli_addr, &addr_size);
              if (newsockfd < 0)
                  DEBUG_ERR("failed to accept connection");
 
 
-             Request *tmp = new Request(newsockfd);
-             std::thread t(&Request::handleRequest, tmp);
+             Request req(newsockfd);
+             std::thread t(&Request::handleRequest, &req);
              t.detach();
          }
     }
