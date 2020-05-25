@@ -2,14 +2,17 @@
 
 #include <cstring>
 #include <sstream>
+#include <stdio.h>
 #include <thread>
 
 namespace SimpleHttp {
     Request::Request(int connfd) {
+        std::cout << "initializing request" << std::endl;
         this->connfd = connfd;
         this->parseHeader();
     }
     int Request::parseHeader() {
+        std::cout << "parsing request" << std::endl;
         std::stringstream header;
 
         int nbytes;
@@ -63,6 +66,7 @@ namespace SimpleHttp {
     }
 
     void Request::handleRequest() {
+        std::cout << "handling request" << std::endl;
         int status;
         if(!(status = parseHeader())) {
             Response::sendErrorResponse(connfd, status);
@@ -101,15 +105,19 @@ namespace SimpleHttp {
             headers["Connection"] = "close";
             Response::sendHeader(connfd, STATUS_OK, headers);
 
-            char c;
-            while(f.get(c))
-                write(connfd, &c, 1);
+            if(this->method == "GET"){
+                char c;
+                while(f.get(c))
+                    write(connfd, &c, 1);
+
+            }
+            close(connfd);
         }
     }
 
     SimpleServer::SimpleServer(int port, int reuse_address) {
         this->port = port;
-        this->reuse_address = reuse_address;
+        this->reuse_address = 1;
     }
 
     int SimpleServer::initSocket(){
@@ -123,14 +131,14 @@ namespace SimpleHttp {
         struct sockaddr_in serv_addr;
         
         // cleanup garbage values in serv_addr 
-        memset(&serv_addr, 0, sizeof(serv_addr));
+        memset(&serv_addr, 0, sizeof(this->serv_addr));
 
         this->serv_addr.sin_family = AF_INET;
         this->serv_addr.sin_addr.s_addr = INADDR_ANY;
         this->serv_addr.sin_port = htons(this->port);
 
-        if (bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0)
-            DEBUG_ERR("binding failed");
+        if (bind(sockfd, (struct sockaddr *) &this->serv_addr, sizeof(this->serv_addr)) < 0)
+            perror("binding failed");
 
         if (listen(sockfd, 30000) < 0)
             DEBUG_ERR("listen() failed");
@@ -151,7 +159,6 @@ namespace SimpleHttp {
                  DEBUG_ERR("failed to accept connection");
 
 
-             DEBUG_ERR("accepted connection");
              Request *tmp = new Request(newsockfd);
              std::thread t(&Request::handleRequest, tmp);
              t.detach();
