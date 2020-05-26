@@ -15,6 +15,7 @@ namespace SimpleHttp {
         int nbytes;
         char c[4];
         int len = 0;
+        // read until double crlf
         while((nbytes = read(this->connfd, &c[0], 1)) > 0) {
             header << c[0];
             len++;
@@ -36,7 +37,7 @@ namespace SimpleHttp {
         header >> this->uri;
         header >> this->version;
 #ifdef DEBUG
-        std::cout << "status: " << this->uri << " " << this->version << "eol"<< std::endl;
+        std::cout << "Request " << this->method << " " << this->uri << std::endl;
 #endif
         getline(header, s, '\n');
         // load additional header fields
@@ -149,6 +150,9 @@ namespace SimpleHttp {
                 break;
         }
 
+#ifdef DEBUG
+        std::cout << "Response " << reason << std::endl;
+#endif
 
         std::string line = HTTP_VERSION + " " + std::to_string(status) + " " + reason + CRLF;
         write(connfd, line.c_str(), line.length());
