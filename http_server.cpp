@@ -13,41 +13,41 @@ namespace SimpleHttp {
         std::stringstream header;
 
         int nbytes;
-        char c;
-        const std::string double_crlf = "\r\n\r\n";
-        int idx = 0;
-        while ((nbytes = read(connfd, &c, 1)) > 0) {
-            header << c;
-
-            // read until double CRLF
-            if(c == double_crlf[idx]) {
-                idx++;
-                if(idx == 4)
+        char c[4];
+        int len = 0;
+        while((nbytes = read(this->connfd, &c[0], 1)) > 0) {
+            header << c[0];
+            len++;
+            if(c[0] == LF && len >= 4) {
+                header.seekg(-4, header.end);
+                header.get(c[0]);
+                header.get(c[1]);
+                header.get(c[2]);
+                header.get(c[3]);
+                if(strcmp(c, CRLF CRLF) == 0)
                     break;
-            }else if(c == CR){
-                idx = 1;
-            }else{
-                idx = 0;
             }
         }
-        
+
+        header.seekg(0, header.beg);
+
         std::string s;
-#ifdef DEBUG
-        getline(header, s, '\n');
-        std::cout << "STATUS_LINE:" << s << std::endl;
-        header.seekg(0, std::ios::beg);
-#endif
         header >> this->method;
         header >> this->uri;
         header >> this->version;
+#ifdef DEBUG
+        std::cout << "status: " << this->uri << " " << this->version << "eol"<< std::endl;
+#endif
         getline(header, s, '\n');
-
         // load additional header fields
         while(getline(header, s, '\n')) {
-            if(s != "") {
+            if(s != "\r" && s != "") {
                 size_t pos = s.find(':');
                 if(pos == std::string::npos) {
-                    break;
+#ifdef DEBUG
+                    std::cout << "bad header" << s << s.length() << std::endl;
+#endif
+                    return -1;
                 }
 
                 std::string name = s.substr(0, pos);
@@ -61,18 +61,16 @@ namespace SimpleHttp {
     void Request::handleRequest() {
         int status;
         if((status = parseHeader()) < 0) {
-#ifdef DEBUG
-            std::cout << status << std::endl;
-#endif
-            Response::sendErrorResponse(connfd, STATUS_BAD_REQUEST);
+            rh_.sendErrorResponse(this->connfd, STATUS_BAD_REQUEST);
             return;
         }
 
         if(this->version != HTTP_VERSION) {
 #ifdef DEBUG
-            std::cout << this->version << std::endl;
+            std::cout << "Bad version:" << this->version << std::endl;
 #endif
-            Response::sendErrorResponse(connfd, STATUS_HTTP_VERSION_NOT_SUPPORTED);
+            rh_.sendErrorResponse(this->connfd, STATUS_HTTP_VERSION_NOT_SUPPORTED);
+            close(this->connfd);
             return;
         }
 
@@ -80,13 +78,16 @@ namespace SimpleHttp {
         // All other methods are OPTIONAL. RFC7231 p21
         if(this->method == "GET" || this->method == "HEAD") {
             std::ifstream f;
-            std::string mime_type;
-            long file_size;
-            if((file_size = UriHandler::getFileByURI(this->uri, f, mime_type)) < 0) {
-                Response::sendErrorResponse(connfd, STATUS_NOT_FOUND);
-                close(connfd);
+            std::string file_path;
+            getFilePathFromUri(this->uri, file_path);
+            long file_size = getFileSize(file_path);
+            if(file_size < 0) {
+                rh_.sendErrorResponse(this->connfd, STATUS_NOT_FOUND);
+                close(this->connfd);
                 return;
             }
+
+            headers["Content-Length"] = std::to_string(file_size);
 
             // additional headers to be filled
             std::map<std::string, std::string> headers;
@@ -95,22 +96,78 @@ namespace SimpleHttp {
             // generate a Content-Type header field in that message unless the
             // intended media type of the enclosed representation is unknown to the
             // sender.
-
+            std::string mime_type;
+            getMimeType(file_path, mime_type);
             if(mime_type != "") {
                 headers["Content-Type"] = mime_type;
             }
-            headers["Content-Length"] = std::to_string(file_size);
             headers["Connection"] = "close";
-            Response::sendHeader(connfd, STATUS_OK, headers);
+            rh_.sendHeader(this->connfd, STATUS_OK, headers);
 
             if(this->method == "GET"){
+                f.open(file_path);
                 char c;
                 while(f.get(c))
-                    write(connfd, &c, 1);
+                    write(this->connfd, &c, 1);
 
+                f.close();
             }
-            close(connfd);
+            close(this->connfd);
+        }else{
+            rh_.sendErrorResponse(this->connfd, STATUS_NOT_IMPLEMENTED);
+            close(this->connfd);
         }
+    }
+
+    void ResponseHandler::sendErrorResponse(int connfd, int status) {
+        std::map<std::string, std::string> headers;
+        headers["Content-Length"] = "0";
+        headers["Connection"] = "close";
+        sendHeader(connfd, status, headers);
+    }
+
+    void ResponseHandler::sendHeader(int connfd, int status, std::map<std::string, std::string> &headers) {
+        std::string reason;
+        switch(status) {
+            case STATUS_OK:
+                reason = "OK";
+                break;
+            case STATUS_BAD_REQUEST:
+                reason = "Bad Request";
+                break;
+            case STATUS_NOT_IMPLEMENTED:
+                reason = "Not Implemented";
+                break;
+            case STATUS_NOT_FOUND:
+                reason = "Not Found";
+                break;
+            case STATUS_HTTP_VERSION_NOT_SUPPORTED:
+                reason = "HTTP version not supported";
+                break;
+            default:
+                reason = std::to_string(status);
+                break;
+        }
+
+
+        std::string line = HTTP_VERSION + " " + std::to_string(status) + " " + reason + CRLF;
+        write(connfd, line.c_str(), line.length());
+
+        bool has_content_length = false;
+        for (auto const& h: headers) {
+            if(h.first  == "Content-Length") {
+                has_content_length = true;
+                continue;
+            }
+
+            line = h.first + ": " + h.second + CRLF;
+            write(connfd, line.c_str(), line.length());
+        }
+        if(has_content_length){
+            line = "Content-Length: " + headers["Content-Length"] + CRLF;
+            write(connfd, line.c_str(), line.length());
+        }
+        write(connfd, CRLF, 2);
     }
 
     SimpleServer::SimpleServer(int port, int reuse_address) {
@@ -138,7 +195,7 @@ namespace SimpleHttp {
         if (bind(sockfd, (struct sockaddr *) &this->serv_addr, sizeof(this->serv_addr)) < 0)
             perror("binding failed");
 
-        if (listen(sockfd, 30000) < 0)
+        if (listen(sockfd, 100000) < 0)
             DEBUG_ERR("listen() failed");
 
         return sockfd;
@@ -158,8 +215,8 @@ namespace SimpleHttp {
                  DEBUG_ERR("failed to accept connection");
 
 
-             Request req(newsockfd);
-             std::thread t(&Request::handleRequest, &req);
+             Request *req = new Request(newsockfd);
+             std::thread t(&Request::handleRequest, req);
              t.detach();
          }
     }
