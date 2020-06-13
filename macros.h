@@ -3,8 +3,8 @@
 
 #include <string>
 
-const std::string HTTP_VERSION = "HTTP/1.1";
-const std::string SERVE_DIR = "example_dir";
+const char HTTP_VERSION[] = "HTTP/1.1";
+const char SERVE_DIR[] = "example_dir";
 
 #define CR      '\r'
 #define CRCR    "\r\r"
@@ -57,8 +57,7 @@ const std::string SERVE_DIR = "example_dir";
 #define STATUS_GATEWAY_TIMEOUT                 504
 #define STATUS_HTTP_VERSION_NOT_SUPPORTED      505
 
-#define DEBUG_ERR(x) std::cout << "[ERROR] " << x << std::endl
-#define TO_BE_IMPL(x) std::cout << "[ERROR] " << x << \
-    " is not implemented yet!" << x << std::endl
+#define DEBUG_ERR(...) printf("[ERROR] " __VA_ARGS__)
+#define LOG(...)       printf("[LOG] " __VA_ARGS__)
 
 #endif

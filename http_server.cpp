@@ -1,163 +1,167 @@
 #include "http_server.h"
 
 #include <cstring>
+#include <sys/ioctl.h>
 #include <sstream>
 #include <stdio.h>
+#include <stdlib.h>
 #include <thread>
 
 namespace SimpleHttp {
-    Request::Request(int connfd) {
-        this->connfd = connfd;
-    }
-    int Request::parseHeader() {
-        std::stringstream header;
+    int RequestHandler::handleRequest(int sockfd) {
 
-        int nbytes;
-        char c[4];
-        int len = 0;
-        // read until double crlf
-        while((nbytes = read(this->connfd, &c[0], 1)) > 0) {
-            header << c[0];
-            len++;
-            if(c[0] == LF && len >= 4) {
-                header.seekg(-4, header.end);
-                header.get(c[0]);
-                header.get(c[1]);
-                header.get(c[2]);
-                header.get(c[3]);
-                if(strcmp(c, CRLF CRLF) == 0)
+        int read_bytes = 0;
+        while(read(sockfd, &clibuf_[read_bytes], 1) > 0) {
+            if(read_bytes > 4 && clibuf_[read_bytes] == '\n'){
+                if(strcmp(clibuf_ + read_bytes - 3, CRLF CRLF) == 0)
                     break;
             }
-        }
-
-        header.seekg(0, header.beg);
-
-        std::string s;
-        header >> this->method;
-        header >> this->uri;
-        header >> this->version;
+            read_bytes++;
+            if(read_bytes == 1024){
+                sendErrorResponse(sockfd, STATUS_NOT_IMPLEMENTED);
 #ifdef DEBUG
-        std::cout << "Request " << this->method << " " << this->uri << std::endl;
+                DEBUG_ERR("Request too long");
 #endif
-        getline(header, s, '\n');
-        // load additional header fields
-        while(getline(header, s, '\n')) {
-            if(s != "\r" && s != "") {
-                size_t pos = s.find(':');
-                if(pos == std::string::npos) {
-#ifdef DEBUG
-                    std::cout << "bad header" << s << s.length() << std::endl;
-#endif
-                    return -1;
-                }
-
-                std::string name = s.substr(0, pos);
-                std::string value = s.substr(pos + 1, s.length());
-                headers[name] = value;
+                return -1;
             }
         }
-        return 0;
-    }
+        if(read_bytes == 0){
+            LOG("socket hung up\n");
+            return -1;
+        }
+        clibuf_[read_bytes] = '\0';
 
-    void Request::handleRequest() {
-        int status;
-        if((status = parseHeader()) < 0) {
-            rh_.sendErrorResponse(this->connfd, STATUS_BAD_REQUEST);
-            return;
+#ifdef DEBUG
+        DEBUG_ERR("Request %s\n", clibuf_);
+#endif
+
+
+        char *method, *uri, *version;
+        method = strtok(clibuf_, " \r");
+        uri = strtok(NULL, " \r");
+        version = strtok(NULL, " \r");
+#ifdef DEBUG
+        DEBUG_ERR("method %s uri %s version %s\n",method, uri, version);
+#endif
+
+        // load additional header fields
+        char *saveptr;
+        while(1) {
+            char *line = strtok(NULL, "\n");
+#ifdef DEBUG
+            DEBUG_ERR("line: %s\n", line);
+#endif
+            if(!line)
+                break;
+            if(strcmp(line, "\r") && strlen(line) > 0) {
+                char *name = strtok_r(line, ":", &saveptr);
+                if(strlen(saveptr) == 0) {
+#ifdef DEBUG
+                    DEBUG_ERR("Bad header: %s\n", name);
+#endif
+                    sendErrorResponse(sockfd, STATUS_BAD_REQUEST);
+                    return -1;
+                }
+            } 
         }
 
-        if(this->version != HTTP_VERSION) {
+        if(strcmp(version, HTTP_VERSION)) {
 #ifdef DEBUG
-            std::cout << "Bad version:" << this->version << std::endl;
+            DEBUG_ERR("Bad version: %s\n", version);
 #endif
-            rh_.sendErrorResponse(this->connfd, STATUS_HTTP_VERSION_NOT_SUPPORTED);
-            close(this->connfd);
-            return;
+            sendErrorResponse(sockfd, STATUS_HTTP_VERSION_NOT_SUPPORTED);
+            return 0;
         }
 
         // All general-purpose servers MUST support the methods GET and HEAD.
         // All other methods are OPTIONAL. RFC7231 p21
-        if(this->method == "GET" || this->method == "HEAD") {
-            std::ifstream f;
-            std::string file_path;
-            getFilePathFromUri(this->uri, file_path);
-            long file_size = getFileSize(file_path);
-            if(file_size < 0) {
-                rh_.sendErrorResponse(this->connfd, STATUS_NOT_FOUND);
-                close(this->connfd);
-                return;
+        if(!strcmp(method, "GET") || !strcmp(method, "HEAD")) {
+            char *file_name;
+            file_name = strtok(uri, "?");
+            strcpy(string_buf, SERVE_DIR);
+            strcat(string_buf, file_name);
+
+            long file_size = getFileSize(string_buf);
+            if(file_size <= 0) {
+                sendErrorResponse(sockfd, STATUS_NOT_FOUND);
+                return 0;
             }
 
-            headers["Content-Length"] = std::to_string(file_size);
-
-            // additional headers to be filled
             std::map<std::string, std::string> headers;
+            headers["Content-Length"] = std::to_string(file_size);
 
             // A sender that generates a message containing a payload body SHOULD
             // generate a Content-Type header field in that message unless the
             // intended media type of the enclosed representation is unknown to the
             // sender.
             std::string mime_type;
-            getMimeType(file_path, mime_type);
+            getMimeType(string_buf, mime_type);
             if(mime_type != "") {
                 headers["Content-Type"] = mime_type;
             }
-            headers["Connection"] = "close";
-            rh_.sendHeader(this->connfd, STATUS_OK, headers);
 
-            if(this->method == "GET"){
-                f.open(file_path);
+            if(!strcmp(method, "GET")){
+                FILE *f = fopen(string_buf, "r");
+                sendHeader(sockfd, STATUS_OK, headers);
+                if(f == NULL)
+                    DEBUG_ERR("Could not open %s\n", string_buf);
                 char c;
-                while(f.get(c))
-                    write(this->connfd, &c, 1);
-
-                f.close();
+                int send_len = 0;
+                while((c = fgetc(f)) != EOF){
+                    write(sockfd, &c, 1);
+                    send_len++;
+                }
+                write(sockfd, CRLF, 2);
+                std::cout << "Sent body of length " << send_len << std::endl;
+                fclose(f);
+            }else{
+                sendHeader(sockfd, STATUS_OK, headers);
             }
-            close(this->connfd);
+            return 0;
         }else{
-            rh_.sendErrorResponse(this->connfd, STATUS_NOT_IMPLEMENTED);
-            close(this->connfd);
+            sendErrorResponse(sockfd, STATUS_NOT_IMPLEMENTED);
+            return -1;
         }
     }
 
-    void ResponseHandler::sendErrorResponse(int connfd, int status) {
+    void RequestHandler::sendErrorResponse(int connfd, int status) {
         std::map<std::string, std::string> headers;
         headers["Content-Length"] = "0";
         headers["Connection"] = "close";
         sendHeader(connfd, status, headers);
     }
 
-    void ResponseHandler::sendHeader(int connfd, int status, std::map<std::string, std::string> &headers) {
-        std::string reason;
+    void RequestHandler::sendHeader(int sockfd, int status, std::map<std::string, std::string> &headers) {
+        strcpy(string_buf, HTTP_VERSION);
         switch(status) {
             case STATUS_OK:
-                reason = "OK";
+                strcat(string_buf, " 200 OK" CRLF);
                 break;
             case STATUS_BAD_REQUEST:
-                reason = "Bad Request";
+                strcat(string_buf, " 400 Bad Request" CRLF);
                 break;
             case STATUS_NOT_IMPLEMENTED:
-                reason = "Not Implemented";
+                strcat(string_buf, " 501 Not Implemented" CRLF);
                 break;
             case STATUS_NOT_FOUND:
-                reason = "Not Found";
+                strcat(string_buf, " 404 Not Found" CRLF);
                 break;
             case STATUS_HTTP_VERSION_NOT_SUPPORTED:
-                reason = "HTTP version not supported";
+                strcat(string_buf, " 505 HTTP version not supported" CRLF);
                 break;
             default:
-                reason = std::to_string(status);
+                sprintf(string_buf + strlen(string_buf), " %d" CRLF, status);
                 break;
         }
 
 #ifdef DEBUG
-        std::cout << "Response " << reason << std::endl;
+        DEBUG_ERR("Response %s\n", string_buf);
 #endif
 
-        std::string line = HTTP_VERSION + " " + std::to_string(status) + " " + reason + CRLF;
-        write(connfd, line.c_str(), line.length());
+        write(sockfd, string_buf, strlen(string_buf));
 
         bool has_content_length = false;
+        std::string line;
         for (auto const& h: headers) {
             if(h.first  == "Content-Length") {
                 has_content_length = true;
@@ -165,63 +169,140 @@ namespace SimpleHttp {
             }
 
             line = h.first + ": " + h.second + CRLF;
-            write(connfd, line.c_str(), line.length());
+            write(sockfd, line.c_str(), line.length());
         }
         if(has_content_length){
             line = "Content-Length: " + headers["Content-Length"] + CRLF;
-            write(connfd, line.c_str(), line.length());
+            write(sockfd, line.c_str(), line.length());
         }
-        write(connfd, CRLF, 2);
+        write(sockfd, CRLF, 2);
     }
 
-    SimpleServer::SimpleServer(int port, int reuse_address) {
-        this->port = port;
-        this->reuse_address = 1;
+    SimpleServer::SimpleServer() {
+        fds_size_ = 100;
+        fd_count_ = 0;
+        fds_ = (pollfd *) malloc(sizeof *fds_ * fds_size_);
     }
 
-    int SimpleServer::initSocket(){
-        this->sockfd = socket(AF_INET, SOCK_STREAM, 0);
-        if (sockfd < 0)
-            DEBUG_ERR("failed to init socket");
+    void SimpleServer::initSocket(int port){
+        int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+        int on = 1;
 
-        if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &this->reuse_address, sizeof(int)) < 0)
-            DEBUG_ERR("setsockopt(SO_REUSEADDR) failed");
+        if (sockfd < 0) {
+            perror("socket() failed");
+            exit(-1);
+        }
+
+        // set socket to be reuseable
+        if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(int)) < 0) {
+            perror("setsockopt(SO_REUSEADDR) failed");
+            close(sockfd);
+            exit(-1);
+        }
+
+        // set socket to be nonblocking
+        if (ioctl(sockfd, FIONBIO, (char *)&on) < 0){
+            perror("ioctl() failed");
+            close(sockfd);
+            exit(-1);
+        }
         
         struct sockaddr_in serv_addr;
         
         // cleanup garbage values in serv_addr 
-        memset(&serv_addr, 0, sizeof(this->serv_addr));
+        memset(&serv_addr, 0, sizeof(serv_addr));
 
-        this->serv_addr.sin_family = AF_INET;
-        this->serv_addr.sin_addr.s_addr = INADDR_ANY;
-        this->serv_addr.sin_port = htons(this->port);
+        serv_addr.sin_family = AF_INET;
+        serv_addr.sin_addr.s_addr = INADDR_ANY;
+        serv_addr.sin_port = htons(port);
 
-        if (bind(sockfd, (struct sockaddr *) &this->serv_addr, sizeof(this->serv_addr)) < 0)
+        if (bind(sockfd, (sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
             perror("binding failed");
+            close(sockfd);
+            exit(-1);
+        }
 
-        if (listen(sockfd, 100000) < 0)
-            DEBUG_ERR("listen() failed");
+        if (listen(sockfd, 64) < 0) {
+            perror("listen() failed");
+            close(sockfd);
+            exit(-1);
+        }
 
-        return sockfd;
+        // poll for ready-to-read on incoming connection
+        fds_[0].fd = sockfd;
+        fds_[0].events = POLLIN;
+        fd_count_ += 1;
+        LOG("Successfully initialized listener.\n");
+    }
+
+    // Push back a new file descriptor to the list of file descriptor
+    void SimpleServer::addNewFd(int newfd) {
+        if (fd_count_ == fds_size_) {
+            fds_size_ *= 2;
+            fds_ = (struct pollfd *) realloc(fds_, sizeof(struct pollfd) * fds_size_);
+        }
+        
+        fds_[fd_count_].fd = newfd;
+        fds_[fd_count_].events = POLLIN;
+        
+        fd_count_++;
+    }
+
+    // Removes file descriptor at the given index
+    void SimpleServer::removeFd(int index) {
+        // Since we dont need to maintain the order, // we can just rewrite it with the last fd.
+        // One of the reason why this is better than just using std::vector
+        fds_[index] = fds_[fd_count_ - 1];
+        fd_count_ -= 1;
     }
 
     int SimpleServer::startServer() {
-         int sockfd = this->initSocket();
+         int newfd;
 
-         int newsockfd;
-         struct sockaddr_in cli_addr;
-         socklen_t addr_size = sizeof(cli_addr);
+         bool run_server = true;
+         LOG("Starting to poll\n");
+         while(run_server) {
+             if(poll(fds_, fd_count_, -1) <= 0) {
+                 perror("polling failed");
+                 exit(-1);
+             }
+             
+             for(int i = 0; i < fd_count_; i++) {
+                 if(fds_[i].revents != 0) {
+                     if(fds_[i].revents != POLLIN) {
+                         DEBUG_ERR("polling returned unexpected result");
+                         run_server = false;
+                         break;
+                     }
 
-         // Accept incoming connections
-         while(true) {
-             newsockfd = accept(sockfd, (struct sockaddr*) &cli_addr, &addr_size);
-             if (newsockfd < 0)
-                 DEBUG_ERR("failed to accept connection");
+                     // if listener is ready to read, handle new connection
+                     if(i == 0) {
+                         newfd = accept(fds_[0].fd, NULL, NULL);
+                         if(newfd < 0) {
+                             if(errno != EWOULDBLOCK) {
+                                 perror("accept() failed");
+                                 run_server = false;
+                             }
+                             break;
+                         }else{
+                             addNewFd(newfd);
+                             LOG("accepted new connection, total: %d\n", fd_count_);
+                         }
+                     }else{
+                         if(rh_.handleRequest(fds_[i].fd) < 0) {
+                             close(fds_[i].fd);
+                             removeFd(i);
+                         }
+                     }
+                 }
+             }
+         }
 
-
-             Request *req = new Request(newsockfd);
-             std::thread t(&Request::handleRequest, req);
-             t.detach();
+         // close all the remaining open sockets
+         for (int i = 0; i < fd_count_; i++) {
+                 if(fds_[i].fd >= 0)
+                     close(fds_[i].fd);
+                   
          }
     }
 }

@@ -3,7 +3,8 @@
 #include <iostream>
 
 int main(int argc, char* argv[]) {
-    SimpleHttp::SimpleServer server(8000);
+    SimpleHttp::SimpleServer server;
+    server.initSocket(8080);
     server.startServer();
     return 0;
 }

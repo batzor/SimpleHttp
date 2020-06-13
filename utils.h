@@ -2,13 +2,17 @@
 #define UTILS_H
 
 #include "macros.h"
+#include <cstring>
 #include <iostream>
 #include <sys/stat.h>
 
 // checks if string ends with the given string
-inline bool strEndsWith(const std::string &s, const std::string &e) {
-    return s.length() >= e.length()
-        && s.compare(s.length() - e.length(), e.length(), e) == 0;
+inline bool strEndsWith(char *s, const char e[]) {
+    size_t len1 = strlen(s);
+    size_t len2 = strlen(e);
+    
+    return len1 >= len2
+        && strcmp(s + len1 - len2, e) == 0;
 }
 
 // checks if file exists and returns its size
@@ -25,7 +29,7 @@ inline void getFilePathFromUri(std::string uri, std::string &file_path) {
     file_path = SERVE_DIR + uri.substr(0, delim_idx);
 }
 
-inline void getMimeType(std::string &file_name, std::string &mime_type) {
+inline void getMimeType(char *file_name, std::string &mime_type) {
     if(strEndsWith(file_name, ".html") || strEndsWith(file_name, ".htm"))
         mime_type = "text/html";
     else if(strEndsWith(file_name, ".css"))
