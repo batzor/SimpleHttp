@@ -237,6 +237,8 @@ namespace SimpleHttp {
              if(fds_[i].fd >= 0)
                  close(fds_[i].fd);
          }
+
+         free(fds_);
     }
 
     SimpleServer::SimpleServer() {
@@ -332,9 +334,8 @@ namespace SimpleHttp {
     void SimpleServer::cleanupServer() {
         for(size_t i = 0;i < pool_size;i++) {
             workers_[i].join();
-#ifdef DEBUG
+            delete(handlers_[i]);
             LOG("worker %lu finished successfully.\n", i);
-#endif
         }
     }
 }
