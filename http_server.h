@@ -4,6 +4,7 @@
 #include "macros.h"
 #include "utils.h"
 
+#include <csignal>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -17,16 +18,16 @@
 #include <unistd.h>
 #include <vector>
 
+
 namespace SimpleHttp {
     class RequestHandler {
         public:
             RequestHandler();
-            bool is_done;
             void sendErrorResponse(int sockfd, int status);
             void sendHeader(int sockfd, int status, std::map<std::string, std::string> &headers);
             int handleRequest(int sockfd);
 
-            int fd_count_;
+            volatile int fd_count_;
             // mutex for read/write operation on fds_
             std::mutex rw_mtx;
             // mutex for reallocating fds_
@@ -47,14 +48,16 @@ namespace SimpleHttp {
     class SimpleServer {
         public:
             SimpleServer();
-            bool is_done;
             void initSocket(int port);
             int startServer(void);
 
         private:
+            int listenfd_;
+            int pool_size;
             std::vector<RequestHandler *> handlers_;
             std::vector<std::thread> workers_;
-            int listenfd_;
+
+            void cleanupServer();
     };
 }
 

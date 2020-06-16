@@ -1,10 +1,16 @@
 #include "http_server.h"
 
 #include <cstring>
+#include <limits.h>
 #include <sys/ioctl.h>
 #include <sstream>
 #include <stdio.h>
 #include <stdlib.h>
+
+volatile sig_atomic_t is_done;
+void signalHandler(int sig) {
+    is_done = true;
+}
 
 namespace SimpleHttp {
     RequestHandler::RequestHandler() {
@@ -24,9 +30,7 @@ namespace SimpleHttp {
             read_bytes++;
             if(read_bytes == 1024){
                 sendErrorResponse(sockfd, STATUS_NOT_IMPLEMENTED);
-#ifdef DEBUG
-                DEBUG_ERR("Request too long");
-#endif
+                LOG("Request too long\n");
                 return -1;
             }
         }
@@ -35,34 +39,21 @@ namespace SimpleHttp {
         }
         clibuf_[read_bytes] = '\0';
 
-#ifdef DEBUG
-        DEBUG_ERR("Request %s\n", clibuf_);
-#endif
-
-
         char *method, *uri, *version;
         method = strtok(clibuf_, " \r");
         uri = strtok(NULL, " \r");
         version = strtok(NULL, " \r");
-#ifdef DEBUG
-        DEBUG_ERR("method %s uri %s version %s\n",method, uri, version);
-#endif
 
         // load additional header fields
         char *saveptr;
         while(1) {
             char *line = strtok(NULL, "\n");
-#ifdef DEBUG
-            DEBUG_ERR("line: %s\n", line);
-#endif
             if(!line)
                 break;
             if(strcmp(line, "\r") && strlen(line) > 0) {
                 char *name = strtok_r(line, ":", &saveptr);
                 if(strlen(saveptr) == 0) {
-#ifdef DEBUG
-                    DEBUG_ERR("Bad header: %s\n", name);
-#endif
+                    LOG("Bad header: %s\n", name);
                     sendErrorResponse(sockfd, STATUS_BAD_REQUEST);
                     return -1;
                 }
@@ -70,9 +61,7 @@ namespace SimpleHttp {
         }
 
         if(strcmp(version, HTTP_VERSION)) {
-#ifdef DEBUG
-            DEBUG_ERR("Bad version: %s\n", version);
-#endif
+            LOG("Bad version: %s\n", version);
             sendErrorResponse(sockfd, STATUS_HTTP_VERSION_NOT_SUPPORTED);
             return 0;
         }
@@ -108,7 +97,7 @@ namespace SimpleHttp {
                 FILE *f = fopen(string_buf, "r");
                 sendHeader(sockfd, STATUS_OK, headers);
                 if(f == NULL)
-                    DEBUG_ERR("Could not open %s\n", string_buf);
+                    LOG("Could not open %s\n", string_buf);
                 char c;
                 int send_len = 0;
                 while((c = fgetc(f)) != EOF){
@@ -158,7 +147,7 @@ namespace SimpleHttp {
         }
 
 #ifdef DEBUG
-        DEBUG_ERR("Response %s\n", string_buf);
+        LOG("Response %s\n", string_buf);
 #endif
 
         write(sockfd, string_buf, strlen(string_buf));
@@ -219,17 +208,16 @@ namespace SimpleHttp {
 
              // loop through the connected clients
              realloc_mtx.lock();
-             int count = fd_count_;
              for(int i = 0; i < fd_count_; i++) {
                  if(fds_[i].revents != 0) {
                      if(fds_[i].revents != POLLIN) {
-                         DEBUG_ERR("polling returned unexpected result");
+                         LOG("polling returned unexpected result");
                          break;
                      }
 
                      if(handleRequest(fds_[i].fd) < 0) {
                          close(fds_[i].fd);
-                         //Removing from the fds_ is unsafe inside the loop
+                         //Removing from the list is unsafe inside the loop
                          remove_list_.push(i);
                      }
                  }
@@ -246,15 +234,15 @@ namespace SimpleHttp {
 
          // close all the remaining open sockets
          for (int i = 0; i < fd_count_; i++) {
-                 if(fds_[i].fd >= 0)
-                     close(fds_[i].fd);
+             if(fds_[i].fd >= 0)
+                 close(fds_[i].fd);
          }
     }
 
     SimpleServer::SimpleServer() {
-        is_done = false;
-        int max_thread = std::thread::hardware_concurrency();
-        for(int i = 0;i < max_thread;i++) {
+        is_done = 0;
+        pool_size = std::thread::hardware_concurrency();
+        for(int i = 0;i < pool_size;i++) {
             handlers_.push_back(new RequestHandler);
         }
     }
@@ -306,32 +294,47 @@ namespace SimpleHttp {
     }
 
     int SimpleServer::startServer() {
+        signal(SIGINT, signalHandler);
+        signal(SIGTERM, signalHandler);
 
-         LOG("Starting to poll\n");
-         for(auto h: handlers_){
-             workers_.push_back(std::thread(&RequestHandler::pollLoop, h));
-         }
+        LOG("Starting to poll\n");
+        // initialize worker threads
+        for(auto h: handlers_){
+            workers_.push_back(std::thread(&RequestHandler::pollLoop, h));
+        }
 
-         int newfd;
-         while(!is_done) {
-             // if listener is ready to read, handle new connection
-             newfd = accept(listenfd_, NULL, NULL);
-             if(newfd < 0) {
-                 if(errno != EWOULDBLOCK) {
-                     perror("accept() failed");
-                     is_done = true;
-                 }
-             }else{
-                 int min_thread_work = 999999;
-                 RequestHandler *free_handler;
-                 for(size_t i = 0;i < handlers_.size();i++) {
-                     if(handlers_[i]->fd_count_ < min_thread_work)
-                         free_handler = handlers_[i];
-                 }
+        int newfd;
+        while(!is_done) {
+            // if listener is ready to read, handle new connection
+            newfd = accept(listenfd_, NULL, NULL);
+            if(newfd < 0) {
+                if(errno != EWOULDBLOCK) {
+                    perror("accept() failed");
+                    is_done = true;
+                }
+            }else{
+                int min_thread_work = INT_MAX;
+                RequestHandler *free_handler;
+                for(int i = 0;i < pool_size;i++) {
+                    if(handlers_[i]->fd_count_ < min_thread_work)
+                        free_handler = handlers_[i];
+                }
 
-                 free_handler->addNewFd(newfd);
-             }
-         }
-         return 0;
+                free_handler->addNewFd(newfd);
+            }
+        }
+
+        cleanupServer();
+
+        return 0;
+    }
+
+    void SimpleServer::cleanupServer() {
+        for(size_t i = 0;i < pool_size;i++) {
+            workers_[i].join();
+#ifdef DEBUG
+            LOG("worker %lu finished successfully.\n", i);
+#endif
+        }
     }
 }
