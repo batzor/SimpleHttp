@@ -5,11 +5,16 @@
 #include <sstream>
 #include <stdio.h>
 #include <stdlib.h>
-#include <thread>
 
 namespace SimpleHttp {
-    int RequestHandler::handleRequest(int sockfd) {
+    RequestHandler::RequestHandler() {
+        is_done = false;
+        fds_size_ = 100;
+        fd_count_ = 0;
+        fds_ = (pollfd *) malloc(sizeof *fds_ * fds_size_);
+    }
 
+    int RequestHandler::handleRequest(int sockfd) {
         int read_bytes = 0;
         while(read(sockfd, &clibuf_[read_bytes], 1) > 0) {
             if(read_bytes > 4 && clibuf_[read_bytes] == '\n'){
@@ -26,7 +31,6 @@ namespace SimpleHttp {
             }
         }
         if(read_bytes == 0){
-            LOG("socket hung up\n");
             return -1;
         }
         clibuf_[read_bytes] = '\0';
@@ -112,7 +116,6 @@ namespace SimpleHttp {
                     send_len++;
                 }
                 write(sockfd, CRLF, 2);
-                std::cout << "Sent body of length " << send_len << std::endl;
                 fclose(f);
             }else{
                 sendHeader(sockfd, STATUS_OK, headers);
@@ -178,32 +181,104 @@ namespace SimpleHttp {
         write(sockfd, CRLF, 2);
     }
 
+    // Push back a new file descriptor to the list of file descriptor
+    void RequestHandler::addNewFd(int newfd) {
+        rw_mtx.lock();
+        if (fd_count_ == fds_size_) {
+            fds_size_ *= 2;
+            realloc_mtx.lock();
+            fds_ = (struct pollfd *) realloc(fds_, sizeof(struct pollfd) * fds_size_);
+            realloc_mtx.unlock();
+        }
+        
+        fds_[fd_count_].fd = newfd;
+        fds_[fd_count_].events = POLLIN;
+        
+        fd_count_++;
+        rw_mtx.unlock();
+    }
+
+    // Removes file descriptor at the given index
+    void RequestHandler::removeFd(int index) {
+        // Since we dont need to maintain the order, // we can just rewrite it with the last fd.
+        // One of the reason why this is better than just using std::vector
+        fds_[index] = fds_[fd_count_ - 1];
+        fd_count_ -= 1;
+    }
+
+    void RequestHandler::pollLoop() {
+         while(!is_done) {
+             // if no client to poll, then continue
+             if(fd_count_ == 0)
+                 continue;
+
+             if(poll(fds_, fd_count_, -1) <= 0) {
+                 perror("polling failed");
+                 exit(-1);
+             }
+
+             // loop through the connected clients
+             realloc_mtx.lock();
+             int count = fd_count_;
+             for(int i = 0; i < fd_count_; i++) {
+                 if(fds_[i].revents != 0) {
+                     if(fds_[i].revents != POLLIN) {
+                         DEBUG_ERR("polling returned unexpected result");
+                         break;
+                     }
+
+                     if(handleRequest(fds_[i].fd) < 0) {
+                         close(fds_[i].fd);
+                         //Removing from the fds_ is unsafe inside the loop
+                         remove_list_.push(i);
+                     }
+                 }
+             }
+             realloc_mtx.unlock();
+
+             rw_mtx.lock();
+             while(!remove_list_.empty()){
+                 removeFd(remove_list_.top());
+                 remove_list_.pop();
+             }
+             rw_mtx.unlock();
+         }
+
+         // close all the remaining open sockets
+         for (int i = 0; i < fd_count_; i++) {
+                 if(fds_[i].fd >= 0)
+                     close(fds_[i].fd);
+         }
+    }
+
     SimpleServer::SimpleServer() {
-        fds_size_ = 100;
-        fd_count_ = 0;
-        fds_ = (pollfd *) malloc(sizeof *fds_ * fds_size_);
+        is_done = false;
+        int max_thread = std::thread::hardware_concurrency();
+        for(int i = 0;i < max_thread;i++) {
+            handlers_.push_back(new RequestHandler);
+        }
     }
 
     void SimpleServer::initSocket(int port){
-        int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+        listenfd_ = socket(AF_INET, SOCK_STREAM, 0);
         int on = 1;
 
-        if (sockfd < 0) {
+        if (listenfd_ < 0) {
             perror("socket() failed");
             exit(-1);
         }
 
         // set socket to be reuseable
-        if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(int)) < 0) {
+        if (setsockopt(listenfd_, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(int)) < 0) {
             perror("setsockopt(SO_REUSEADDR) failed");
-            close(sockfd);
+            close(listenfd_);
             exit(-1);
         }
 
         // set socket to be nonblocking
-        if (ioctl(sockfd, FIONBIO, (char *)&on) < 0){
+        if (ioctl(listenfd_, FIONBIO, (char *)&on) < 0){
             perror("ioctl() failed");
-            close(sockfd);
+            close(listenfd_);
             exit(-1);
         }
         
@@ -216,93 +291,47 @@ namespace SimpleHttp {
         serv_addr.sin_addr.s_addr = INADDR_ANY;
         serv_addr.sin_port = htons(port);
 
-        if (bind(sockfd, (sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
+        if (bind(listenfd_, (sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
             perror("binding failed");
-            close(sockfd);
+            close(listenfd_);
             exit(-1);
         }
 
-        if (listen(sockfd, 64) < 0) {
+        if (listen(listenfd_, 64) < 0) {
             perror("listen() failed");
-            close(sockfd);
+            close(listenfd_);
             exit(-1);
         }
-
-        // poll for ready-to-read on incoming connection
-        fds_[0].fd = sockfd;
-        fds_[0].events = POLLIN;
-        fd_count_ += 1;
         LOG("Successfully initialized listener.\n");
     }
 
-    // Push back a new file descriptor to the list of file descriptor
-    void SimpleServer::addNewFd(int newfd) {
-        if (fd_count_ == fds_size_) {
-            fds_size_ *= 2;
-            fds_ = (struct pollfd *) realloc(fds_, sizeof(struct pollfd) * fds_size_);
-        }
-        
-        fds_[fd_count_].fd = newfd;
-        fds_[fd_count_].events = POLLIN;
-        
-        fd_count_++;
-    }
-
-    // Removes file descriptor at the given index
-    void SimpleServer::removeFd(int index) {
-        // Since we dont need to maintain the order, // we can just rewrite it with the last fd.
-        // One of the reason why this is better than just using std::vector
-        fds_[index] = fds_[fd_count_ - 1];
-        fd_count_ -= 1;
-    }
-
     int SimpleServer::startServer() {
-         int newfd;
 
-         bool run_server = true;
          LOG("Starting to poll\n");
-         while(run_server) {
-             if(poll(fds_, fd_count_, -1) <= 0) {
-                 perror("polling failed");
-                 exit(-1);
-             }
-             
-             for(int i = 0; i < fd_count_; i++) {
-                 if(fds_[i].revents != 0) {
-                     if(fds_[i].revents != POLLIN) {
-                         DEBUG_ERR("polling returned unexpected result");
-                         run_server = false;
-                         break;
-                     }
+         for(auto h: handlers_){
+             workers_.push_back(std::thread(&RequestHandler::pollLoop, h));
+         }
 
-                     // if listener is ready to read, handle new connection
-                     if(i == 0) {
-                         newfd = accept(fds_[0].fd, NULL, NULL);
-                         if(newfd < 0) {
-                             if(errno != EWOULDBLOCK) {
-                                 perror("accept() failed");
-                                 run_server = false;
-                             }
-                             break;
-                         }else{
-                             addNewFd(newfd);
-                             LOG("accepted new connection, total: %d\n", fd_count_);
-                         }
-                     }else{
-                         if(rh_.handleRequest(fds_[i].fd) < 0) {
-                             close(fds_[i].fd);
-                             removeFd(i);
-                         }
-                     }
+         int newfd;
+         while(!is_done) {
+             // if listener is ready to read, handle new connection
+             newfd = accept(listenfd_, NULL, NULL);
+             if(newfd < 0) {
+                 if(errno != EWOULDBLOCK) {
+                     perror("accept() failed");
+                     is_done = true;
                  }
+             }else{
+                 int min_thread_work = 999999;
+                 RequestHandler *free_handler;
+                 for(size_t i = 0;i < handlers_.size();i++) {
+                     if(handlers_[i]->fd_count_ < min_thread_work)
+                         free_handler = handlers_[i];
+                 }
+
+                 free_handler->addNewFd(newfd);
              }
          }
-
-         // close all the remaining open sockets
-         for (int i = 0; i < fd_count_; i++) {
-                 if(fds_[i].fd >= 0)
-                     close(fds_[i].fd);
-                   
-         }
+         return 0;
     }
 }
