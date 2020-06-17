@@ -10,3 +10,4 @@ A HTTP/1.1 polling server with thread pooling, using only Linux system API and C
 
 ## Future works
 - Support other methods and additional headers
+- Provide better benchmarking tool
