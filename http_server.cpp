@@ -269,12 +269,6 @@ namespace SimpleHttp {
              
              for(int i = 0; i < fd_count_; i++) {
                  if(fds_[i].revents != 0) {
-                     if(fds_[i].revents != POLLIN) {
-                         DEBUG_ERR("polling returned unexpected result");
-                         run_server = false;
-                         break;
-                     }
-
                      // if listener is ready to read, handle new connection
                      if(i == 0) {
                          newfd = accept(fds_[0].fd, NULL, NULL);
