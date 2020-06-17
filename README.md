@@ -1,5 +1,5 @@
 # SimpleHttp
-A HTTP/1.1 polling server with thread pooling, using only Linux system API and C++. 
+A HTTP/1.1 polling server with thread pooling, using only Linux system API and C++ with the aim of serving as many requests as possible in a short period of time. 
 
 ## How to run
 `$ make test`  
