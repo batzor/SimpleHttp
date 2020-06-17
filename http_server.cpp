@@ -243,7 +243,7 @@ namespace SimpleHttp {
 
     SimpleServer::SimpleServer() {
         is_done = 0;
-        pool_size = std::thread::hardware_concurrency();
+        pool_size = std::thread::hardware_concurrency() / 2;
         for(int i = 0;i < pool_size;i++) {
             handlers_.push_back(new RequestHandler);
         }
