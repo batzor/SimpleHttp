@@ -24,6 +24,7 @@ namespace SimpleHttp {
         int read_bytes = 0;
         while(read(sockfd, &clibuf_[read_bytes], 1) > 0) {
             if(read_bytes > 4 && clibuf_[read_bytes] == '\n'){
+                clibuf_[read_bytes + 1] = '\0';
                 if(strcmp(clibuf_ + read_bytes - 3, CRLF CRLF) == 0)
                     break;
             }
