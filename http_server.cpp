@@ -209,12 +209,7 @@ namespace SimpleHttp {
              // loop through the connected clients
              realloc_mtx.lock();
              for(int i = 0; i < fd_count_; i++) {
-                 if(fds_[i].revents != 0) {
-                     if(fds_[i].revents != POLLIN) {
-                         LOG("polling returned unexpected result");
-                         break;
-                     }
-
+                 if(fds_[i].revents & POLLIN) {
                      if(handleRequest(fds_[i].fd) < 0) {
                          close(fds_[i].fd);
                          //Removing from the list is unsafe inside the loop
