@@ -1,7 +1,7 @@
 #include "http_server.h"
 
 #include <cstring>
-#include <sys/ioctl.h>
+#include <sys/fcntl.h>
 #include <sstream>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,19 +9,20 @@
 
 namespace SimpleHttp {
     int RequestHandler::handleRequest(int sockfd) {
-
         int read_bytes = 0;
         while(read(sockfd, &clibuf_[read_bytes], 1) > 0) {
             if(read_bytes > 4 && clibuf_[read_bytes] == '\n'){
-                if(strcmp(clibuf_ + read_bytes - 3, CRLF CRLF) == 0)
+                clibuf_[read_bytes + 1] = '\0';
+                if(strcmp(clibuf_ + read_bytes - 3, CRLF CRLF) == 0) {
                     break;
+                }
             }
             read_bytes++;
             if(read_bytes == 1024){
-                sendErrorResponse(sockfd, STATUS_NOT_IMPLEMENTED);
 #ifdef DEBUG
                 DEBUG_ERR("Request too long");
 #endif
+                sendErrorResponse(sockfd, STATUS_NOT_IMPLEMENTED);
                 return -1;
             }
         }
@@ -29,6 +30,8 @@ namespace SimpleHttp {
             LOG("socket hung up\n");
             return -1;
         }
+        
+        read_bytes -= 2;
         clibuf_[read_bytes] = '\0';
 
 #ifdef DEBUG
@@ -112,7 +115,6 @@ namespace SimpleHttp {
                     send_len++;
                 }
                 write(sockfd, CRLF, 2);
-                std::cout << "Sent body of length " << send_len << std::endl;
                 fclose(f);
             }else{
                 sendHeader(sockfd, STATUS_OK, headers);
@@ -201,8 +203,8 @@ namespace SimpleHttp {
         }
 
         // set socket to be nonblocking
-        if (ioctl(sockfd, FIONBIO, (char *)&on) < 0){
-            perror("ioctl() failed");
+        if (fcntl(sockfd, F_SETFL, O_NONBLOCK) < 0){
+            perror("fcntl() failed");
             close(sockfd);
             exit(-1);
         }
@@ -271,7 +273,7 @@ namespace SimpleHttp {
                  if(fds_[i].revents != 0) {
                      // if listener is ready to read, handle new connection
                      if(i == 0) {
-                         newfd = accept(fds_[0].fd, NULL, NULL);
+                        newfd = accept(fds_[0].fd, NULL, NULL);
                          if(newfd < 0) {
                              if(errno != EWOULDBLOCK) {
                                  perror("accept() failed");
@@ -294,9 +296,8 @@ namespace SimpleHttp {
 
          // close all the remaining open sockets
          for (int i = 0; i < fd_count_; i++) {
-                 if(fds_[i].fd >= 0)
-                     close(fds_[i].fd);
-                   
+             if(fds_[i].fd >= 0)
+                 close(fds_[i].fd);
          }
     }
 }
