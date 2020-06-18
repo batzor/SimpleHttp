@@ -10,7 +10,7 @@ Avg time to serve 10k request: 12.772ms
 3. Polling with threadpool @ feature/threadpool branch.  
 Avg time to serve 10k request: 12.090ms
 
-All using the benchmark script in master branch. 
+All using the benchmark script in master branch. Threadpool does not perform well on this benchmark because most of the time, only one worker thread is enough to handle the requests. We need better benchmarking script that sends requests at a higher speed in this case.
 
 NOTE: Polling server is CPU intensive because it is running infinite loop in multiple threads, waiting for a job to be assigned. To properly benchmark the server, you need to use 2 different machines for client and server.
 
